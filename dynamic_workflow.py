@@ -139,7 +139,7 @@ def create_agent(tools: List[Tool], system_message: str):
                     azure_endpoint="https://openai-eastus-instance-02.openai.azure.com/",
                     api_key=os.getenv("APIKEY")
                 )
-    #llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", api_key="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")
+    #llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", api_key="")
     agent = OpenAIFunctionsAgent(llm=llm, prompt=prompt, tools=tools)
     return AgentExecutor(agent=agent, tools=tools, verbose=True)
 
