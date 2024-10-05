@@ -1,343 +1,547 @@
-from __future__ import print_function
-import mimetypes
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile,  status, Response,Query,Request,HTTPException,Body,Form,Depends,status
+import uuid
+import asyncio
+import shutil
+import yaml
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any, AsyncIterator
-import asyncio
-import json
-import base64
-import os
-from langgraph.graph import Graph, END
-from langchain.agents import AgentExecutor, Tool
-from langchain.agents.openai_functions_agent.base import OpenAIFunctionsAgent
-from langchain.prompts import MessagesPlaceholder
-from langchain.schema import SystemMessage, HumanMessage
-from langchain.tools import BaseTool
+from pandasai.connectors import PostgreSQLConnector, MySQLConnector, SQLConnector
+from pandasai.ee.connectors import SnowFlakeConnector
 from langchain_openai import AzureChatOpenAI
-
-import asyncio
-from typing import AsyncIterator, Dict, List, Any, Optional
-from fastapi.responses import JSONResponse, StreamingResponse
-from langgraph.graph import Graph, END
-from langchain.agents import AgentExecutor, Tool
-from langchain.agents.openai_functions_agent.base import OpenAIFunctionsAgent
+import pandasai
+from pandasai import Agent
+from typing import List, Optional, Dict,Any
+import os
+from uuid import uuid4
+from functools import lru_cache
+import threading
+from langchain_core.prompts import MessagesPlaceholder
+from pandasai import SmartDataframe,Agent
+from langchain_core.prompts import ChatPromptTemplate
+from pandasai.connectors.yahoo_finance import YahooFinanceConnector
 from langchain_groq import ChatGroq
-from langchain.prompts import  MessagesPlaceholder
-from langchain.schema import SystemMessage, HumanMessage
-from langchain.tools import BaseTool
-from pydantic import BaseModel, Field
+from langchain_community.agent_toolkits.sql.base import create_sql_agent
+from langchain_community.utilities import SQLDatabase
+import io
+from typing import Any
+from dotenv import load_dotenv
+from pandasai.ee.agents.judge_agent import JudgeAgent
+from guardrails import Guard
+#from rails.unusual_prompt import UnusualPrompt
+judge = JudgeAgent()
+from langchain.memory import ConversationBufferMemory
+
 import base64
-from fastapi.websockets import WebSocketDisconnect
-from fastapi import FastAPI, HTTPException, Response, WebSocket,Request
-from fastapi.middleware.cors import CORSMiddleware
-from requests_oauthlib import OAuth2Session  
-import os
-import pickle
+import pandas as pd
+from sqlalchemy.exc import SQLAlchemyError
 import json
-from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
-import logging
-import pickle
-import base64
-import os.path
+from psycopg2 import sql
+from sqlalchemy import Date, Float, Integer, Numeric, String, create_engine, inspect,text
+from sqlalchemy.orm import sessionmaker
+from collections import defaultdict
+from functools import wraps
+from greeting import greet
+from chart import charts
+from prompts import get_prompts
+from model import llm
+from converse import converse
+import cProfile
+import pstats
+import io
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from collections import defaultdict
 import json
-from fastapi.middleware.cors import CORSMiddleware
-from googleapiclient.errors import HttpError
-from langchain_openai import AzureChatOpenAI
-import base64
-from email.message import EmailMessage
-import google.auth
-from googleapiclient.discovery import build
+from cachetools import TTLCache
+from langchain.tools  import Tool
+from langchain.agents import initialize_agent, AgentType
+asyncio.get_event_loop().set_debug(True)
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+app = FastAPI()
+origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+class Database(BaseModel):
+    host: Optional[str] = None
+    port: Optional[str] = None
+    database: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    tables: Optional[List[str]] = None
+    databasetype: Optional[str] = None
+    account: Optional[str] = None
+    warehouse: Optional[str] = None
+    dbSchema: Optional[str] = None
+    driver: Optional[str] = None
+    action:str=None
 
-from requests_oauthlib import OAuth2Session
-from gsheets import Sheets
-import pickle
-import json
-from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from email.message import EmailMessage
-import uvicorn
+os.environ['PANDASAI_API_KEY'] ="$2a$10$T0.tWMY89DwvAo0eda0dZuOoKdArKwuOEDDeMcDrP/oiM/hsi6cX."  
+
+cache = TTLCache(maxsize=100, ttl=300)  # Cache up to 100 items for 5 minutes
+
+# Create a thread pool for CPU-bound tasks
+thread_pool = ThreadPoolExecutor(max_workers=4)
+class AgentManager:
+    def __init__(self):
+        self.agent=None
+        self.panda_agent = None 
+        self.sql_agent = None
+        self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)   
 
 
-ID=''
-
-#####################################################################################################################
-CLIENT_ID     = '0af9998a-56ab-4d56-8927-fe759d189952'
-CLIENT_SECRET = '30530718-0286-41ea-9de6-a0e27e833122'
-
-SCOPES        = ['crm.objects.contacts.read','oauth','crm.objects.leads.read']
-
-
-
-def hubspot_tool():
-    """
-    Connects to HubSpot, fetches all contacts, and then filters for leads.
-    """
-    app_config = {
-        'client_id': CLIENT_ID,
-        'client_secret': CLIENT_SECRET,
-        'scopes': SCOPES,
-        'auth_uri': 'https://app.hubspot.com/oauth/authorize',
-        'token_uri': 'https://api.hubapi.com/oauth/v1/token'
-    }
-
-    if os.path.exists('hstoken.pickle'):
-        with open('hstoken.pickle', 'rb') as tokenfile:
-            token = pickle.load(tokenfile)
-    else:
-        token = InstallAppAndCreateToken(app_config)
-        SaveTokenToFile(token)
-
-    hubspot = OAuth2Session(
-        app_config['client_id'],
-        token=token,
-        auto_refresh_url=app_config['token_uri'],
-        auto_refresh_kwargs=app_config,
-        token_updater=SaveTokenToFile
-    )
-
-    # Define the properties we want to retrieve
-    properties = [
-        "firstname", "lastname", "email", "company", "phone", "website",
-        "hs_lead_status", "lifecyclestage", "hs_analytics_source", "industry"
-    ]
+    def initialize_agents(self, sdf, llm1, description, judge, memory):
+        # Initialize PandasAI agent if it hasn't been created yet
+        if self.panda_agent is None:
+            self.panda_agent = Agent(
+                sdf,
+                memory_size=15,
+                config={
+                    "llm": llm1,
+                    "data_viz_library": "seaborn",
+                    "open_charts": False,
+                    "enable_cache": True,
+                    "max_retries": 4,
+                    "description": description
+                },
+                judge=judge
+            )
 
     
-    url = 'https://api.hubapi.com/crm/v3/objects/contacts'
-    params = {
-        'properties': ','.join(properties),
-        'limit': 100  # Adjust as needed
-    }
-    response = hubspot.get(url, params=params)
-    response_data = response.json()
+        tools = [
+            Tool(
+                name="Plot_Agent",
+                func=self.panda_agent.chat,  
+                description="This tool is for plotting visualizations and answering queries about postgres and csv data ."
+            )
+        ]
 
-    # Save the full response to a file
-    with open('all_contacts_data.json', 'w') as file:
-        json.dump(response_data, file, indent=4)
+        
+        # if memory:
+        #     tools.append(
+        #         Tool(
+        #             name="SQL Agent",
+        #             func=self.sql_agent_function,  
+        #             description="Used for answering SQL-related queries."
+        #         )
+        #     )
 
-    leads = []
-    other_contacts = []
-
-    if 'results' in response_data:
-        for contact in response_data['results']:
-            contact_id = contact['id']
-            contact_properties = contact['properties']
-            
-            # Print all properties for debugging
-            print(f"Contact ID: {contact_id}")
-            print(f"Contact Properties:")
-            for prop, value in contact_properties.items():
-                print(f"  {prop}: {value}")
-            print("---")
-
-            # Check if the contact is a lead
-            if contact_properties.get('hs_lead_status') == 'None':
-                other_contacts.append(contact)
-            else:
-                
-                leads.append(contact)
-
-    print(f"\nTotal contacts retrieved: {len(response_data.get('results', []))}")
-    print(f"Leads found: {len(leads)}")
-    print(f"Other contacts: {len(other_contacts)}")
-
-    # Save leads to a separate file
-    with open('leads_data.json', 'w') as file:
-        json.dump(leads, file, indent=4)
-
-    return leads
-def InstallAppAndCreateToken(config, port=8088):
-    """
-    Creates a simple local web app+server to authorize your app with a HubSpot hub.
-    Returns the refresh and access token.
-    """  
-    from wsgiref import simple_server
-    import webbrowser
-    local_webapp = SimpleAuthCallbackApp()
-    local_webserver = simple_server.make_server(host='localhost', port=port, app=local_webapp)
-    redirect_uri = 'http://{}:{}/'.format('localhost', local_webserver.server_port)
-    oauth = OAuth2Session(
-        client_id=config['client_id'],
-        scope=config['scopes'],
-        redirect_uri=redirect_uri
-    )
-    auth_url, _ = oauth.authorization_url(config['auth_uri'])    
-    print('-- Authorizing your app via Browser --')
-    print('If your browser does not open automatically, visit this URL:')
-    print(auth_url)
-    webbrowser.open(auth_url, new=1, autoraise=True)
-    local_webserver.handle_request() 
-    auth_response = local_webapp.request_uri.replace('http','https')
-    token = oauth.fetch_token(
-        config['token_uri'],
-        authorization_response=auth_response,
-      
-        include_client_id=True,
-        client_secret=config['client_secret']
-    )
-    return token
-
-class SimpleAuthCallbackApp(object):
-    """
-    Used by our simple server to receive and 
-    save the callback data authorization.
-    """
-    def __init__(self):
-        self.request_uri = None
-        self._success_message = (
-            'All set! Your app is authorized.  ' + 
-            'You can close this window now and go back where you started from.'
+    
+        self.agent = initialize_agent(
+            tools=tools,
+            llm=llm1,
+            verbose=True,
+            handle_parsing_error=True,
+            agent=AgentType.
         )
-
-    def __call__(self, environ, start_response):
-        from wsgiref.util import request_uri
         
-        start_response('200 OK', [('Content-type', 'text/plain')])
-        self.request_uri = request_uri(environ)
-        return [self._success_message.encode('utf-8')]
-
-def SaveTokenToFile(token):
-    """
-    Saves the current token to file for use in future sessions.
-    """
-    with open('hstoken.pickle', 'wb') as tokenfile:
-        pickle.dump(token, tokenfile)
         
-###############################################################################################################################################
+        return self.agent
+
+    
+    # def sql_agent_function(self, id: str, query: str) -> Any:
+    #     system = """You are an agent designed to interact with databases. Given an input question, create a syntactically correct {dialect} query to run, then look at the results of the query and return the answer.
+    # Previous conversation history:
+    # {chat_history}
+    # QUERY FOR ROWS AND COLUMNS THAT ARE PRESENT IN THE TABLE. You MUST double check your query before executing it. If you get an error while executing a query, rewrite the query and try again.
+    # DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database. The input may have names in lower case. If querying, make your query align by using the LIKE operator in the query such that they have the most similarity.
+    # THERE MAY BE WHITESPACES IN BETWEEN; CONSIDER THIS POSSIBILITY AS WELL. FOR RESULTS HAVING COST, DISPLAY DOLLAR or RUPEE SIGN IN THE RESULT.
+    # DONT DISPLAY '*' IN THE RESPONSE. DONT SHOW ANY SAMPLE REPRESENTATIONS."""
 
         
-########################################################################################################################
+    #     # SQL agent's prompt template
+    #     prompt = ChatPromptTemplate.from_messages([
+    #         ("system", system),
+    #         ("human", "{input}"),
+    #         MessagesPlaceholder("agent_scratchpad")
+    #     ])
 
+    #     # Load the database connection details
+    #     file_path = f"data/postgres/{id}/{id}.yaml"
+    #     with open(file_path, "r") as file:
+    #         data = yaml.safe_load(file)
+    #         db_data = Database(**data)
 
+    #     # Create SQL connection string
+    #     conn_str = f"postgresql://{db_data.username}:{db_data.password}@{db_data.host}:{db_data.port}/{db_data.database}"
+    #     db = SQLDatabase.from_uri(conn_str, include_tables=db_data.tables)
 
-def google_sheets_tool():
-    """
-    Integrates lead data with Google Sheets.
-    """
-    SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://mail.google.com/"]
+      
+    #     sql_agent = create_sql_agent(
+    #         llm,
+    #         db=db,
+    #         agent_type="openai-tools",
+    #         verbose=True,
+    #         prompt=prompt,
+    #         handle_parsing_errors=True,
+    #         agent_executor_kwargs={
+    #             "memory": memory,
+    #             "return_intermediate_steps": True
+    #         }
+    #     )
+    #     return sql_agent
+
+  
+    def clear_agents(self):
+        self.panda_agent = None
+        self.sql_agent = None
+@lru_cache()  
+def get_agent_manager():
+    return AgentManager()  
+
+# Profiling decorator
+# def profile(func):
+#     @wraps(func)
+#     async def wrapper(*args, **kwargs):
+#         pr = cProfile.Profile()
+#         pr.enable()
+#         result = await func(*args, **kwargs)
+#         pr.disable()
+#         s = io.StringIO()
+#         ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
+#         ps.print_stats()
+#         print(s.getvalue())
+#         return result
+#     return wrapper  
+        
+#########################################################################################################################################
+
+#POST API TO UPLOAD FILE
+@app.post("/upload-file/")
+
+async def upload_file(file: UploadFile = File(...)):
    
-    creds = None
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
-            creds = pickle.load(token)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file('client-secret.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
-            
-    service = build("sheets", "v4", credentials=creds)
-
     try:
-        spreadsheet = {"properties": {"title": "HubSpot Leads"}}
-        spreadsheet = service.spreadsheets().create(body=spreadsheet, fields="spreadsheetId").execute()
-        spreadsheet_id = spreadsheet.get('spreadsheetId')
-        print(f"Spreadsheet ID: {spreadsheet_id}")
+        contents = await file.read()
+        unique_id = str(uuid.uuid4())
+        folder_path = os.path.join('data', 'csv', unique_id)   
+        os.makedirs(folder_path, exist_ok=True)
 
-        # Prepare headers and data
-        headers = ["ID", "Created At", "Updated At", "First Name", "Last Name", "Email", "Company", "Phone", "Website", "Lead Status", "Lifecycle Stage", "Source", "Industry"]
-        values = [headers]  # Start with headers
+        if file.filename.endswith('.csv'):
+            csv_file_path = os.path.join(folder_path, f"{unique_id}.csv")
+            with open(csv_file_path, 'wb') as f:
+                f.write(contents)
 
-        with open("leads_data.json", 'r') as file:
-            lead_data = json.load(file)
+        elif file.filename.endswith(('.xls', '.xlsx')):
+            excel_file_path = os.path.join(folder_path, file.filename)
+            with open(excel_file_path, 'wb') as f:
+                f.write(contents)
+        else:
+            return {"message": "Unsupported file format", "error": True}
 
-        for lead in lead_data:
-            properties = lead['properties']
-            row = [
-                lead['id'],
-                lead['createdAt'],
-                lead['updatedAt'],
-                properties.get('firstname', ''),
-                properties.get('lastname', ''),
-                properties.get('email', ''),
-                properties.get('company', ''),
-                properties.get('phone', ''),
-                properties.get('website', ''),
-                properties.get('hs_lead_status', ''),
-                properties.get('lifecyclestage', ''),
-                properties.get('hs_analytics_source', ''),
-                properties.get('industry', '')
-            ]
-            values.append(row)
+        return {"message": f"File '{file.filename}' uploaded successfully to folder'","uuid":unique_id, "error": False}
+    
+    except Exception as e:
+        return {"message": "Error processing file", "error": True, "exp": str(e)}
+    
 
-        body = {"values": values}
-        result = service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range='Sheet1!A1',  
-            valueInputOption='RAW',
-            body=body
-        ).execute()
+#########################################################################################################################################################
 
-        print(f"{result.get('updatedCells')} cells updated.")
+#POST API TO CONNECT TO DATABASES
+@app.post("/database-connection/")
 
-        # Export to CSV
-        sheets = Sheets.from_files('client-secret.json', 'storage.json')
-        url = f'https://docs.google.com/spreadsheets/d/{spreadsheet_id}'
-        s = sheets.get(url)
-        s.sheets[0].to_csv('hubspot_leads.csv', encoding='utf-8', dialect='excel')
+async def connect_to_database(response: Response, db: Database):
+    if db.databasetype=='postgres':
 
-        return spreadsheet_id
+        try:
+            unique_id = str(uuid4())
+            dir_path = f"data/postgres/{unique_id}"
+            file_path = f"{dir_path}/{unique_id}.yaml"
+            os.makedirs(dir_path, exist_ok=True)
+            with open(file_path, "w") as file:
+                yaml.dump(db.dict(), file)
+
+            response.status_code = status.HTTP_200_OK
+            return {"message": "Database credentials saved", "uuid": unique_id}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        
+#############################################################################################################################################
+    
+####################################################################################################################################################################      
+#POST API TO QUERY DATA
+@app.post("/query")
+async def process_query(
+    response: Response,
+    id: str = Query(..., description="UUID string"),
+    query: str = Body(..., description="Query text"),
+    type: str = Body(..., description="database type"),
+    agent_manager: AgentManager = Depends(get_agent_manager)) -> Dict[str, Any]:
+    cache_key = f"{id}:{query}:{type}"
+    if cache_key in cache:
+        return cache[cache_key]
+    
+    agent1=agent_manager.agent
+    response=agent1.invoke(query)
+  #  response.status_code = status.HTTP_200_OK
+    return {
+        "base64_image": "image_base64",
+        "text": response,
+        "dataframe": "json_data",
+        "questions": "ques_df",
+        "error": False,
+    }
+
+    # path = f"data/csv/{id}/{id}.csv"
+    # df = pd.read_csv(path)
+
+
+    # greet_task = greet(query,df.head())
+    # prompts_task = get_prompts(df.head(), id, 'file')
+    # greeting, ques_df = await asyncio.gather(greet_task, prompts_task)
+
+
+    # print('After greet')
+    # if greeting.strip().lower() != 'no':
+    #     text = greeting
+    #     data =pd.DataFrame()
+    # else:
+    #     agent = agent_manager.agent
+    #     result = await asyncio.to_thread(agent.chat, query)
+    #     text, data = process_result(result)
+
+    # image_base64, text = process_image(text)
+    # json_data = data.to_json(orient='records') if not data.empty else ""
+
+
+    # response.status_code = status.HTTP_200_OK
+    # return {
+    #     "base64_image": image_base64,
+    #     "text": str(text),
+    #     "dataframe": json_data,
+    #     "questions": ques_df,
+    #     "error": False,
+    # }
+
+
+
+
+# def process_result(result):
+#     if isinstance(result, pd.DataFrame):
+#         return "Your response has been successfully generated. Kindly refer to the table for details.", result
+#     else:
+#         return str(result), pd.DataFrame()
+
+# def process_image(text: str) -> str:
+#     if isinstance(text, str) and ".png" in text:
+#         image_path = text
+#         with open(image_path, "rb") as image_file:
+#             image_base64 = base64.b64encode(image_file.read()).decode('utf-8')
+#         text =  converse(text)
+#         memory.save_context({"input": "image_generated"}, {"output": text})
+#         print(f"Image generated: {image_path}")
+#         return image_base64,text
+#     else:
+#         return "",text
+   
+
+                
+
+    
+##################################################################################################################################################
+ 
+ #GET API TO GET DASHBOARD DATA
+@app.get("/dashboard-data")
+
+async def dashboard_data(
+    response: Response,
+    id: str = Query(..., description="UUID string"),
+    type: str = Query(..., description="database type"),
+    agent_manager: AgentManager = Depends(get_agent_manager)
+) -> Dict[str, Any]:
+    try:
+        results = []
+        json_file_path = './exports/charts/temp_chart.json'
+        with open(json_file_path, 'r') as file:
+            image_data = json.load(file)
+
+        if type == "postgres":
+            results = await handle_postgres(id, agent_manager, image_data)
+        elif type == "file":
+            results = await handle_file(id, agent_manager, image_data)
+        else:
+            raise ValueError("Invalid data source type")
+
+        response.status_code = status.HTTP_200_OK
+        return {"data": results}
 
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
-        return None
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": str(e)}
 
-def gmail_send_message(to: str, subject: str, body: str):
-    """Create and send an email message"""
-    SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly","https://www.googleapis.com/auth/spreadsheets","https://mail.google.com/"]
-    creds = None
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
-            creds = pickle.load(token)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'client-secret.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
+async def handle_postgres(id: str, agent_manager: AgentManager, image_data: Dict) -> List[Dict]:
+    file_path = f"data/postgres/{id}/{id}.yaml"
+    with open(file_path, "r") as file:
+        data = yaml.safe_load(file)
+        db_data = Database(**data)
 
-    try:
-        service = build("gmail", "v1", credentials=creds)
-        message = EmailMessage()
-
-        message.set_content(body)
-
-        message["To"] = to
-        message["From"] = "testingops2@gmail.com"
-        message["Subject"] = subject
-        
-        ctype, encoding = mimetypes.guess_type("hubspot_leads.csv")
-        if ctype is None or encoding is not None:
-            ctype = "application/octet-stream"
-        maintype, subtype = ctype.split("/", 1)
-
-        with open("hubspot_leads.csv", "rb") as fp:
-            attachment_data = fp.read()
-        message.add_attachment(attachment_data, maintype=maintype, subtype=subtype, filename=os.path.basename("hubspot_leads.csv"))
-
-        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
-        create_message = {"raw": encoded_message}
+    conn_str = f"postgresql://{db_data.username}:{db_data.password}@{db_data.host}:{db_data.port}/{db_data.database}"
+    engine = create_engine(conn_str)
     
-        send_message = (
-            service.users()
-            .messages()
-            .send(userId="me", body=create_message)
-            .execute()
-        )
-        print(f'Message Id: {send_message["id"]}')
-    except HttpError as error:
-        print(f"An error occurred: {error}")
-        send_message = None
-    return f"Message sent to {to} with ID {send_message['id']}"
+    try:
+        with engine.connect() as connection:
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            
+            if not tables:
+                raise ValueError("No tables found in the database")
 
-def platform_tool():
-    return "Used for asking the choice of platform user wants"
+            table_name = db_data.tables[0] if db_data.tables else tables[0]
+            table_info = await get_table_info(connection, inspector, table_name)
+            
+            preview_data = await get_preview_data(connection, table_name)
+            df = pd.DataFrame(preview_data)
+            
+            await save_csv(df, id, "postgres")
+            
+            questions = await get_prompts(df.head(), id, "postgres")
+            
+            connectors = [
+                PostgreSQLConnector(config={
+                    "host": db_data.host,
+                    "port": int(db_data.port),
+                    "database": db_data.database,
+                    "username": db_data.username,
+                    "password": db_data.password,
+                    "table": table,
+                }) for table in db_data.tables
+            ]
+            
+            description = "You are a PostgreSQL database analysis agent. Your main goal is to help non-technical users analyze data from a PostgreSQL database. Formulate SQL queries when needed and provide clear explanations of the results."
+            agent_manager.initialize_agents(connectors, llm, description, judge)
+            
+            return [{**table_info, 'questions': questions, 'image': image_data,"data_preview":preview_data}]
+    finally:
+        engine.dispose()
+
+async def handle_file(id: str, agent_manager: AgentManager, image_data: Dict) -> List[Dict]:
+    path = f"data/csv/{id}/{id}.csv"
+    df = pd.read_csv(path)
+    sdf = SmartDataframe(path)
+
+    description = "You are an Excel/CSV data analysis agent. Your main goal is to help non-technical users analyze data from CSV or Excel sheets. Use pandas operations to process and analyze the data effectively. For visualizations, generate interactive Plotly figures and provide them in JSON format. This enables users to render and interact with charts directly within their web applications. In case of greetings, respond with a greeting. Be sure to understand the user query and then proceed to answer the questions. Use different colors when plotting the charts. DON'T OPEN THE CHART"
+    mem=""
+    agent_manager.initialize_agents(sdf, llm, description, judge,mem)
+    
+    numeric_summaries = {
+        'total_records': len(df),
+        'number_of_numeric_columns': len(df.select_dtypes(include='number').columns),
+        'number_of_non_numeric_columns': len(df.select_dtypes(exclude='number').columns)
+    }
+
+    preview_rows = df.head(15).to_dict(orient='records')
+    #questions = await get_prompts(df.head(), id, "file")
+
+    return [{
+        'numeric_summaries': numeric_summaries,
+        'data_preview': preview_rows,
+        'image': image_data,
+        'questions': "questions"
+    }]
+
+async def get_table_info(connection, inspector, table_name: str) -> Dict:
+    total_records = connection.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+    columns_info = inspector.get_columns(table_name)
+    
+    numeric_types = (Integer, Float, Numeric)
+    non_numeric_types = (String, Date)
+    
+    numeric_columns = [col['name'] for col in columns_info if isinstance(col['type'], numeric_types)]
+    non_numeric_columns = [col['name'] for col in columns_info if isinstance(col['type'], non_numeric_types)]
+    
+    return {
+        'numeric_summaries': {
+            'total_records': total_records,
+            'number_of_numeric_columns': len(numeric_columns),
+            'number_of_non_numeric_columns': len(non_numeric_columns)
+        }
+    }
+
+async def get_preview_data(connection, table_name: str) -> List[Dict]:
+    query = text(f"SELECT * FROM {table_name} LIMIT 15")
+    result = connection.execute(query)
+    column_names = result.keys()
+    return [dict(zip(column_names, row)) for row in result.fetchall()]
+
+async def save_csv(df: pd.DataFrame, id: str, type: str):
+    directory = f'data/{type}/{id}'
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{id}.csv")
+    df.to_csv(path, index=False)
+
+
+###########################################################################################################################################
+
+@app.post("/end-chat/")
+
+async def end_chat(response: Response, type: str = Body(..., description="database type"), id: str = Query(..., description="UUID string"),agent_manager: AgentManager = Depends(get_agent_manager)):
+    if type=="postgres":
+
+        pandasai.clear_cache()
+        folder_path = f"data/postgres/{id}"
+        file_path = os.path.join(folder_path, f"{id}.yaml")
+        agent_manager.clear_agents()
+        
+        memory.clear()
+        if os.path.exists(file_path):
+            shutil.rmtree(folder_path)  
+            response.status_code = status.HTTP_200_OK
+            return {"message": "Chat ended successfully"}
+        else:
+            response.status_code = status.HTTP_404_NOT_FOUND
+            return {"error": "Please upload the file"}  
+    
+    elif type == "file":
+        pandasai.clear_cache()
+       
+        folder_path = f"data/csv/{id}"
+        csv_file_path = os.path.join(folder_path, f"{id}.csv")
+        agent_manager.clear_agents()
+        memory.clear()
+        if os.path.exists(csv_file_path):
+            shutil.rmtree(folder_path)  
+            response.status_code = status.HTTP_200_OK
+            return {"message": "Chat ended successfully"}
+        else:
+            response.status_code = status.HTTP_404_NOT_FOUND
+            return {"error": "Please upload the file"}
+    else:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Please connect to a data source to proceed with the analysis"}
+
+    
+@app.post("/get-table-names")
+# @profile
+async def table_names(connection: Database, response: Response):    
+    
+    if connection.databasetype == "postgres":
+        print("Establishing PostgreSQL connection")
+        conn = f"postgresql+psycopg2://{connection.username}:{connection.password}@{connection.host}:{connection.port}/{connection.database}"
+        engine = create_engine(conn)        
+        try:
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()            
+            print("\nTables in the database:")
+            for table in tables:
+                print(table)            
+            if not tables:
+                response.status_code = status.HTTP_404_NOT_FOUND
+                return {"error": "No tables found in the database"}            
+            return tables
+        except SQLAlchemyError as e:
+            response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            return {"error": f"Database error: {str(e)}"}        
+        finally:
+            # Close the engine
+            engine.dispose()
+    else:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Unsupported database type"}
+
+@app.get("/")
+async def server():
+    return {" message: Server started"}
